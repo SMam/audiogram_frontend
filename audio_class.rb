@@ -3,15 +3,20 @@
 #  Copyright 2007-2009 S Mamiya <MamiyaShn@gmail.com>
 #  0.20091107
 #  0.20120519 : chunky_PNGのgemを使用、ruby1.9対応
+#  0.20120805 : rails支配下の時とそうでないときのライブラリの場所を分けた
 
 require 'chunky_png'
-require 'AA79S.rb'
+if defined? Rails
+  require 'AA79S.rb'
+else
+  require './AA79S.rb'
+end
 
-RAILS_ROOT = ".." if not defined? RAILS_ROOT
-
-#Image_parts_location = RAILS_ROOT+"/lib/assets/" # !!! 必要に応じて変更を !!!
-#Image_parts_location = "./assets/" # とりあえず
-Image_parts_location = "lib/assets/" # とりあえず
+if defined? Rails
+  Image_parts_location = "lib/assets/" # Rails.rootから辿る形
+else
+  Image_parts_location = "./assets/"   # Rails.rootに影響されない場合
+end
 
 # railsの場合，directoryの相対表示の起点は rails/audiserv であるようだ
 Overdraw_times = 2  # 重ね書きの回数．まずは2回，つまり1回前の検査までとする
