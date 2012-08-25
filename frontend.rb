@@ -11,8 +11,6 @@ SERVER_IP = '127.0.0.1' #SERVER_IP = '172.16.41.20' #SERVER_IP = '192.168.1.6'
 SERVER_URI = "http://#{SERVER_IP}:3000/patients/direct_create/"
 AUDIOMETER = "AA-79S"
 
-TEST_MODE = true
-
 if defined? Rails
   Assets_location = "lib/assets/"
 else
@@ -81,24 +79,15 @@ class AudioExam
     when 'test'
       puts 'On the test mode, no request is POST.\n ---'
       puts self.request_body
+      return self.request_body
     end
   end
-end
-
-class Pixbuf_msg
-  def initialize
-    @scan = Gdk::Pixbuf.new(Assets_location + "msg_scan.jpg")
-    @recieve = Gdk::Pixbuf.new(Assets_location + "msg_recieve.jpg")
-    @timeout = Gdk::Pixbuf.new(Assets_location + "msg_timeout.jpg")
-  end
-
-  attr_reader :scan, :recieve, :timeout
 end
 
 class Markup_msg
   def initialize
     @scan = make_markup("IDをバーコードまたはキーボードから入力してください\nscan Barcode or Input ID.", "black")
-    @recieve = make_markup("データ受信中\nRecieving data now...", "black")
+    @receive = make_markup("データ受信中\nReceiving data now...", "black")
     @transmit = make_markup("送信ボタンを押してください\nTransmit, please", "black")
     @timeout = make_markup("時間切れです 中止してやり直してください\nTimeout! Abort and retry please", "red")
     @invalid_id = make_markup("IDが間違っています。再入力してください\nInvalid ID. Scan or Input again", "red")
@@ -109,7 +98,24 @@ class Markup_msg
     markup = "<span foreground=\"#{color}\" size=\"x-large\">#{msg}</span>"
   end
 
-  attr_reader :scan, :recieve, :transmit, :timeout, :invalid_id, :no_data
+  def show(state)
+    case state
+    when "scan"
+      @scan
+    when "receive"
+      @receive
+    when "timeout"
+      @timeout
+    when "transmit"
+      @transmit
+    when "invalid_id"
+      @invalid_id
+    when "no_data"
+      @no_data
+    else
+      nil
+    end
+  end
 end
 
 class Exam_window
@@ -121,10 +127,15 @@ class Exam_window
       false
     end
     @win.signal_connect("destroy") { Gtk.main_quit }
-    @pixbuf_msg = Pixbuf_msg.new
+    @state = "scan" 
+      # @state also can be "receive", "transmit", "timeout", "invalid_id", "no_data"
+    @blank_png = Gdk::Pixbuf.new(Assets_location + "background.png")
     @markup_msg = Markup_msg.new
     deploy_wigets
-
+    set_logics
+    @test_mode = false
+    @test_data = String.new
+    @http_request = nil
   end
 
   def deploy_wigets
@@ -140,11 +151,11 @@ class Exam_window
     id_box.pack_start(@button_id_entry, true, true, 0)
 
     # audiogram appearance
-    @image = Gtk::Image.new(@pixbuf_msg.scan)
+    @image = Gtk::Image.new(@blank_png)
 
     # message area
-    @msg_label = Gtk::Label.new #(text_msg_scan)
-    @msg_label.set_markup(@markup_msg.scan)
+    @msg_label = Gtk::Label.new
+    @msg_label.set_markup(@markup_msg.show(@state))
 
     # comment area
     # comment_retry.active? => true or false
@@ -155,15 +166,15 @@ class Exam_window
     @comment_other_check = Gtk::CheckButton.new(label = "その他 OTHER: write here ----->")
     @comment_other_entry = Gtk::Entry.new
     @comment_other_entry.max_length = 100
-    @comment_other_box = Gtk::HBox.new(false,0)
-    @comment_other_box.pack_start(@comment_other_check, true, true, 0)
-    @comment_other_box.pack_start(@comment_other_entry, true, true, 0)
+    comment_other_box = Gtk::HBox.new(false,0)
+    comment_other_box.pack_start(@comment_other_check, true, true, 0)
+    comment_other_box.pack_start(@comment_other_entry, true, true, 0)
     comment_box = Gtk::VBox.new(false,0)
     comment_box.pack_start(@comment_retry, true, true, 0)
     comment_box.pack_start(@comment_masking, true, true, 0)
     comment_box.pack_start(@comment_after_patch, true, true, 0)
     comment_box.pack_start(@comment_after_med, true, true, 0)
-    comment_box.pack_start(@comment_other_box, true, true, 0)
+    comment_box.pack_start(comment_other_box, true, true, 0)
 
     # button area
     @button_abort = Gtk::Button.new("中止 abort")
@@ -193,168 +204,105 @@ class Exam_window
     @win.add(pack_box)
   end
 
-=begin
-test code
-    @label = Gtk::Label.new("             ")
-    @button = Gtk::Button.new("Hello")
-    @button.signal_connect("clicked") {
-    @label.text = "Hello, world." }
-    @vbox = Gtk::VBox.new
-    @vbox.pack_start(@label)
-    @vbox.pack_start(@button)
-    @window = Gtk::Window.new
-    @window.signal_connect("destroy") {
-      Gtk.main_quit }
-    @window.add(@vbox)
+  def set_logics
+  ## button logics
+    @button_id_entry.signal_connect("clicked") do
+      @id_entry.text = id_entry.text.delete("^0-9") # remove non-number
+      if valid_id?(@id_entry.text) and id_entry.text != ""
+        @state = "receive"
+        @msg_label.set_markup(@markup_msg.show(@state))
+	if @test_mode
+	  @audioexam = AudioExam.new('test')
+	  sent_data = @test_data
+        else
+	  @audioexam = AudioExam.new('flight')
+#          sent_data = receive_data
+          sent_data = Rs232c.new.get_data_from_audiometer  # from 'com_RS232C_AA79S.rb'
+	end
+        if sent_data == "Timeout"
+          @state = "timeout"
+          @msg_label.set_markup(@markup_msg.show(@state))
+        else
+          @audioexam.set_data(@id_entry.text, Time.now.strftime("%Y:%m:%d-%H:%M:%S"),\
+            "comment", sent_data)
+          begin
+            @audioexam.output
+          rescue
+            @state = "no_data"
+            @msg_label.set_markup(markup_msg.show(@state))
+	  else
+            @image.pixbuf = Gdk::Pixbuf.new("./result.png")
+            @state = "transmit"
+            @msg_label.set_markup(markup_msg.show(@state))
+	  end
+          system("mpg123 -q " + Assets_location + "se.mp3")
+        end
+      else
+        @state = "invalid_id"
+        @msg_label.set_markup(@markup_msg.show(@state))
+      end
+    end
+
+    @button_abort.signal_connect("clicked") do
+      reset_properties
+    end
+
+    @button_transmit.signal_connect("clicked") do
+      # @stateがtransmitの時は送る、それ以外 scan, receiveなどの時は何もしない
+      case @state
+      when "transmit"
+        if @audioexam.data[:id] != ''
+          comment = ""
+          comment += "RETRY_" if @comment_retry.active?
+          comment += "MASK_"  if @comment_masking.active?
+          comment += "PATCH_" if @comment_after_patch.active?
+          comment += "MED_"   if @comment_after_med.active?
+          comment += "OTHER:#{comment_other_entry.text}_"\
+	    if (@comment_other_check.active? or /\S+/ =~ @comment_other_entry.text)
+          @audioexam.data[:comment] = comment
+          @http_request = @audioexam.transmit
+          reset_properties
+        else
+          @state = "no_data"
+          msg_label.set_markup(markup_msg.show(@state))
+        end
+      end
+    end
+
+    @button_quit.signal_connect("clicked") do
+      Gtk.main_quit
+    end
   end
 
-  attr_accessor :label, :button
-=end
+  def reset_properties
+    @id_entry.text = ""
+    @image = Gtk::Image.new(@blank_png)
+    @state = "scan"
+    @msg_label.set_markup(@markup_msg.show(@state))
+    @comment_retry.active = false
+    @comment_masking.active = false
+    @comment_after_patch.active = false
+    @comment_after_med.active = false
+    @comment_other_check.active = false
+    @comment_other_entry.text = ""
+    @audioexam = AudioExam.new
+    @win.set_focus(@id_entry)
+  end
 
   def show
     @win.show_all
     Gtk.main
   end
 
-
+  attr_accessor :id_entry, :button_id_entry, :markup_msg, :image, :state, :audioexam,\
+                :test_mode, :test_data, :button_abort, :button_transmit,\
+                :comment_retry, :comment_masking, :comment_after_patch,\
+                :comment_after_med, :comment_other_check, :comment_other_entry,\
+		:http_request
 end
 
 # -----
-
 if ($0 == __FILE__)
   ew = Exam_window.new
   ew.show
 end
-
-
-
-=begin
-
-
-
-## button logics
-button_id_entry.signal_connect("clicked") do
-  case exam.state
-  when 0
-    id_entry.text = id_entry.text.delete("^0-9") # remove non-number
-    if valid_id?(id_entry.text) and id_entry.text != ""
-      image.pixbuf = pixbuf_msg.recieve
-      msg_label.set_markup(markup_msg.recieve)
-      exam.state = 1
-      sent_data = recieve_data
-      if sent_data == "Timeout"
-        image.pixbuf = pixbuf_msg.timeout
-        msg_label.set_markup(markup_msg.timeout)
-      else
-        exam.set_data(id_entry.text, Time.now.strftime("%Y:%m:%d-%H:%M:%S"),\
-	  sent_data, '')
-        # Time.now.strftime("%Y:%m:%d-%H:%M:%S") は 2008:09:27-12:50:00 形式
-        system("mpg123 -q " + Assets_location + "se.mp3")
-        image.pixbuf = Gdk::Pixbuf.new("./result.png")
-        msg_label.set_markup(markup_msg.transmit)
-        exam.state = 2
-      end
-    else
-      puts "invalid"
-      msg_label.set_markup(markup_msg.invalid_id)
-    end
-  end
-end
-
-#=begin
-def new_exam
-  id_entry.text = ""
-  image.pixbuf = pixbuf_msg.scan
-  msg_label.set_markup(markup_msg.scan)
-  comment_retry.active = false
-  comment_masking.active = false
-  comment_after_patch.active = false
-  comment_after_med.active = false
-  comment_other_check.active = false
-  comment_other_entry.text = ""
-  exam = AudioExam.new
-  window.set_focus(id_entry)
-end
-#=end
-
-button_abort.signal_connect("clicked") do
-#  case exam.state
-#  when 2 #3
-    id_entry.text = ""
-    image.pixbuf = pixbuf_msg.scan
-    msg_label.set_markup(markup_msg.scan)
-    comment_retry.active = false
-    comment_masking.active = false
-    comment_after_patch.active = false
-    comment_after_med.active = false
-    comment_other_check.active = false
-    comment_other_entry.text = ""
-    exam = AudioExam.new
-    window.set_focus(id_entry)
-#  end
-end
-
-button_transmit.signal_connect("clicked") do
-  case exam.state
-  when 2
-    if exam.data[:id] != ''
-      comment = ""
-      comment += "RETRY_" if comment_retry.active?
-      comment += "MASK_"  if comment_masking.active?
-      comment += "PATCH_" if comment_after_patch.active?
-      comment += "MED_"   if comment_after_med.active?
-      comment += "OTHER:#{comment_other_entry.text}_" if (comment_other_check.active? or /\S+/ =~ comment_other_entry.text)
-      exam.data[:comment] = comment
-      exam.transmit
-#      exam.state = 3
-
-      id_entry.text = ""
-      image.pixbuf = pixbuf_msg.scan
-      msg_label.set_markup(markup_msg.scan)
-      comment_retry.active = false
-      comment_masking.active = false
-      comment_after_patch.active = false
-      comment_after_med.active = false
-      comment_other_check.active = false
-      comment_other_entry.text = ""
-      exam = AudioExam.new
-      window.set_focus(id_entry)
-    else
-      msg_label.set_markup(markup_msg.no_data)
-    end
-  end
-end
-
-button_quit.signal_connect("clicked") do
-  Gtk.main_quit
-end
-
-# ID enterance trigger : write data recieving procedure here
-def recieve_data
-  # actual code start
-  if not TEST_MODE
-    raw_data = Rs232c.new.get_data_from_audiometer
-  else
-  # dummy code start
-    datafile = "sample_data/data_with_mask.dat"
-    raw_data = String.new
-    File.open(datafile, "r") do |f|
-      raw_data = f.read
-    end
-  end
-
-  if raw_data == "Timeout"
-    return "Timeout"
-  else
-    r = Audiodata.new("raw", raw_data)
-    a = Audio.new(r)
-    a.draw
-    a.output("./result.ppm")
-    system("convert ./result.ppm ./result.png")   # convert with ImageMagick
-    
-    return raw_data
-  end
-end
-
-
-=end
